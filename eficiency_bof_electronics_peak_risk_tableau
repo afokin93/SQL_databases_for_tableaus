@@ -1,0 +1,147 @@
+
+------------------------------------------------ REGRA ------------------------------------------------
+
+--- infos importantes dos casos de MB
+create multiset volatile table parte1, no log as
+  (
+  SELECT distinct
+    tab.site_id,
+    tab.cust_id,
+    first_value(tab.restr) over (partition by tab.caso_id order by tab.caso_id desc) restr,
+    tab.data_fchmto_caso,
+    tab.rep,
+    tab.action_type,
+    tab.resolution,
+    tab.comentario
+  FROM
+    (
+    select distinct
+      b.sit_site_id site_id,
+      a.gca_cust_id cust_id,
+      a.gca_id caso_id,
+      first_value(c.reason_id) over (partition by c.cust_id order by b.date_created) restr,
+      cast(b.date_created as date) data_fchmto_caso,
+      b.admin_id rep,
+      b.action_type,
+      b.resolution,
+      a.gca_comment_cases comentario  
+    from BT_GENERAL_CASES_MANUALREW_EXP a
+    left join WHOWNER.BT_ACTION_MR b
+      on a.gca_id = b.case_id
+    left join WHOWNER.BT_MPR_CUST_RESTRICTION c
+      on a.gca_cust_id = c.cust_id
+    where a.gca_second_subtype = 'bof_pico_electronics'
+      and cast(b.date_created as date) >= current_date - 7
+    ) tab
+  WHERE tab.action_type = 'close_case'
+  )
+with data primary index (cust_id) on commit preserve rows;
+
+
+-- seller PU
+create multiset volatile table es_pu, no log as
+  (
+  select distinct
+    a.cust_id,
+    a.data_fchmto_caso,
+    (case when b.user_id is not null then 1 else 0 end) es_pu
+  from parte1 a
+  left join SCORING.sellers_protected_users b
+    on a.cust_id = b.user_id
+  )
+with data primary index (cust_id) on commit preserve rows;
+
+
+-- todas as restricoes
+create multiset volatile table all_res, no log as
+  (
+  select
+    a.cust_id,
+    b.reason_id,
+    b.creation_date,
+    dense_rank() over (partition by a.cust_id order by b.creation_date, b.reason_id) as orden
+  from parte1 a
+  left join WHOWNER.BT_MPR_CUST_RESTRICTION b
+    on a.cust_id = b.cust_id
+  where b.status = 'P'
+  )
+with data primary index (cust_id) on commit preserve rows;
+
+
+-- res atuais
+create multiset volatile table res_atual, no log as
+  (
+  select
+    a.cust_id,
+    concat(max(case when orden = 1 then b.reason_id else '-' end), 
+           max(case when orden = 2 then concat(' + ' , b.reason_id) else '' end),
+           max(case when orden = 3 then concat(' + ' , b.reason_id) else '' end),
+           max(case when orden = 4 then concat(' + ' , b.reason_id) else '' end),
+           max(case when orden = 5 then concat(' + ' , b.reason_id) else '' end),
+           max(case when orden = 6 then concat(' + ' , b.reason_id) else '' end),
+           max(case when orden = 7 then concat(' + ' , b.reason_id) else '' end),
+           max(case when orden = 8 then concat(' + ' , b.reason_id) else '' end),
+           max(case when orden = 9 then concat(' + ' , b.reason_id) else '' end)) res_atual
+    from parte1 a
+    left join all_res b
+        on a.cust_id = b.cust_id
+    group by a.cust_id
+  )
+with data primary index (cust_id) on commit preserve rows;
+
+
+-- cálculo das eficiências do dia
+create multiset volatile table tabla_final_ef_dia, no log as
+  (
+  select distinct
+    a.data_fchmto_caso,
+    a.cust_id,
+    b.es_pu,
+    (case when c.res_atual <> '-' then 1 else 0 end) efetivo
+  from parte1 a
+  left join es_pu b
+    on a.cust_id = b.cust_id
+  left join res_atual c
+    on a.cust_id = c.cust_id
+  )
+with data primary index (data_fchmto_caso) on commit preserve rows;
+
+
+
+-------------------------- EXECUÇÃO DA REGRA --------------------------
+
+-- tabla de scoring para subir las infos
+create table scoring.bof_pico_electronics_eficiencia
+  (
+  insert_date date,
+  data_fchmto_caso date,
+  cust_id int,
+  es_pu int,
+  efetivo int
+  );
+
+
+-- add infos para o dia de hoje
+insert into scoring.bof_pico_electronics_eficiencia
+  select distinct
+    current_date,
+    a.*
+  from tabla_final_ef_dia a
+  where a.data_fchmto_caso = current_date - 1;
+
+
+
+-------------------------- SELEÇÃO DE DADOS --------------------------
+
+-- DDL dos dados
+select * from scoring.bof_pico_electronics_eficiencia order by 2 desc;
+
+delete from scoring.bof_pico_electronics_eficiencia;
+
+UPDATE scoring.bof_pico_electronics_eficiencia
+  SET insert_date = '2021-12-18'
+  WHERE data_fchmto_caso = '2021-12-17';
+
+
+
+
