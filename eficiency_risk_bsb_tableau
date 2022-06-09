@@ -1,0 +1,106 @@
+
+------------------------------------------------ REGRA ------------------------------------------------
+
+--- infos importantes dos casos de MB
+create multiset volatile table parte1, no log as
+  (
+  SELECT distinct
+    tab.cust_id,
+    tab.site_id,
+    first_value(tab.restr) over (partition by tab.caso_id order by tab.caso_id desc) restr,
+    tab.data_fchmto_caso,
+    tab.rep,
+    tab.action_type,
+    tab.resolution,
+    tab.comentario
+  FROM
+    (
+    select distinct
+      a.gca_id caso_id,
+      a.gca_cust_id cust_id,
+      b.sit_site_id site_id,
+      first_value(c.reason_id) over (partition by c.cust_id order by b.date_created) restr,
+      cast(b.date_created as date) data_fchmto_caso,
+      b.admin_id rep,
+      b.action_type,
+      b.resolution,
+      a.gca_comment_cases comentario  
+    from BT_GENERAL_CASES_MANUALREW_EXP a
+    left join WHOWNER.BT_ACTION_MR b
+      on a.gca_id = b.case_id
+    left join WHOWNER.BT_MPR_CUST_RESTRICTION c
+      on a.gca_cust_id = c.cust_id
+    where a.gca_second_subtype = 'risk_bsb'
+      and cast(b.date_created as date) >= current_date - 30
+    ) tab
+  )
+with data primary index (cust_id) on commit preserve rows;
+
+
+-- cálculo das eficiências do dia
+create multiset volatile table tabla_final_ef_dia, no log as
+  (
+  select
+    data_fchmto_caso,
+    sum(case when resolution = 'Deactive' then 1 else 0 end) inabs,
+    sum(case when resolution = 'Accept' and comentario like '%gris%' then 1 else 0 end) gris,
+    sum(case when resolution = 'Accept' then 1 else 0 end) accept,
+    (inabs+gris+accept) casos,
+    round(cast(sum(case when resolution = 'Deactive' then 1 else 0 end) as float)/cast(count(distinct cust_id) as float),2) eficiencia_restrita,
+    round(cast(sum(case when resolution = 'Accept' and comentario like '%gris%' then 1 else 0 end) as float)/cast(count(distinct cust_id) as float),2) eficiencia_gris,
+    (eficiencia_restrita + eficiencia_gris) eficiencia_ampla
+  from parte1
+  group by 1
+  )
+with data primary index (data_fchmto_caso) on commit preserve rows;
+
+
+
+-------------------------- EXECUÇÃO DA REGRA --------------------------
+
+-- tabla de scoring para subir las infos
+create table scoring.risk_bsb_eficiencia
+  (
+  insert_date date,
+  data_fchmto_caso date,
+  inabs float,
+  casos float,
+  eficiencia_restrita float,
+  eficiencia_gris float,
+  eficiencia_ampla float,
+  eficiencia_restrita_30d float,
+  eficiencia_gris_30d float,
+  eficiencia_ampla_30d float
+  );
+
+
+-- add infos para o dia de hoje
+insert into scoring.risk_bsb_eficiencia
+  select distinct
+    current_date,
+    a.data_fchmto_caso,
+    a.inabs,
+    a.casos,
+    a.eficiencia_restrita,
+    a.eficiencia_gris,
+    a.eficiencia_ampla,
+    (select cast(sum(inabs) as float)/cast(sum(casos) as float) from tabla_final_ef_dia) eficiencia_restrita_30d,
+    (select cast(sum(gris) as float)/cast(sum(casos) as float) from tabla_final_ef_dia) eficiencia_gris_30d,
+    (select cast((sum(inabs)+sum(inabs)) as float)/cast(sum(casos) as float) from tabla_final_ef_dia) eficiencia_ampla_30d
+  from tabla_final_ef_dia a
+  where a.data_fchmto_caso = current_date - 1;
+
+
+
+-------------------------- SELEÇÃO DE DADOS --------------------------
+
+-- DDL dos dados
+select * from scoring.risk_bsb_eficiencia order by 2 desc;
+
+delete from scoring.risk_bsb_eficiencia where insert_date = '2021-11-23';
+
+UPDATE scoring.risk_bsb_eficiencia
+  SET eficiencia_restrita_30d = '0.0566'
+  WHERE data_fchmto_caso = '2021-11-17';
+
+
